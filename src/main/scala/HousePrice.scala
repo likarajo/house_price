@@ -1,7 +1,12 @@
-import org.apache.spark.ml.Pipeline
+import java.util.Calendar
+
+import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.evaluation.RegressionEvaluator
-import org.apache.spark.ml.feature.VectorAssembler
-import org.apache.spark.ml.regression._
+import org.apache.spark.ml.feature.{StringIndexer, StringIndexerModel, VectorAssembler}
+import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.ml.regression.{LinearRegression, _}
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.{Pipeline, PipelineStage}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 
@@ -9,9 +14,20 @@ object HousePrice {
 
   def main(args: Array[String]): Unit = {
 
-    val debug = true
+    if (args.length < 2) {
+      System.err.println("Usage: HousePrice <input dir path> <output dir path>")
+      System.exit(1)
+    }
 
-    val decisionTree = true;
+    val Array(inputDir, outputDir) = args.take(2)
+
+    val time = Calendar.getInstance().getTime.toString.replaceAll(" ", "")
+    //val writer = new PrintWriter(new File(outputDir + "/" + time + ".txt"))
+
+    Logger.getLogger("org").setLevel(Level.OFF)
+    Logger.getLogger("akka").setLevel(Level.OFF)
+
+    val debug = true
 
     val spark = SparkSession
       .builder
@@ -24,155 +40,165 @@ object HousePrice {
 
     /** Get Data */
 
-    val srcDataDir = System.getProperty("user.dir") + "/data/"
-
     var trainingDF = spark.read
       .format("com.databricks.spark.csv") // allows reading CSV files as Spark DataFrames
       .option("delimiter", ",")
       .option("header", "true")
-      .option("nullValue", "NA") // replace null values with NA
+      .option("nullValue", "")
       .schema(trainingSchema)
-      .load(srcDataDir + "train.csv")
+      .load(inputDir + "/train.csv")
+      .withColumnRenamed("SalePrice", "label")
 
     var testDF = spark.read
       .format("com.databricks.spark.csv") // allows reading CSV files as Spark DataFrames
       .option("delimiter", ",")
       .option("header", "true")
-      .option("nullValue", "NA") // replace null values with NA
+      .option("nullValue", "") // replace null values with NA
       .schema(testSchema)
-      .load(srcDataDir + "test.csv")
+      .load(inputDir + "/test.csv")
 
-    if (debug) println("Data read into Dataframes")
+    if (debug) println("Data read into DataFrames")
 
-    trainingDF = trainingDF.select("Id", "SalePrice", "MSSubClass", "LotArea", "OverallQual", "OverallCond", "YearBuilt", "YearRemodAdd", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "1stFlrSF", "2ndFlrSF", "LowQualFinSF", "GrLivArea", "BsmtFullBath", "BsmtHalfBath", "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr", "TotRmsAbvGrd", "Fireplaces", "GarageCars", "GarageArea", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", "3SsnPorch", "ScreenPorch", "PoolArea", "MoSold", "YrSold")
-      .na.fill(0) // replace NA with 0
+    /** Pre-Processing Features */
 
-    testDF = testDF.select("Id", "MSSubClass", "LotArea", "OverallQual", "OverallCond", "YearBuilt", "YearRemodAdd", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "1stFlrSF", "2ndFlrSF", "LowQualFinSF", "GrLivArea", "BsmtFullBath", "BsmtHalfBath", "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr", "TotRmsAbvGrd", "Fireplaces", "GarageCars", "GarageArea", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", "3SsnPorch", "ScreenPorch", "PoolArea", "MoSold", "YrSold")
-      .na.fill(0) // replace NA with 0
+    // Dropped Id column as it does not add any information
+    trainingDF = trainingDF.drop("Id")
+    testDF = testDF.drop("Id")
 
-    if (debug) println("Replaced NA values with 0")
+    val numericColumns =
+      for (tuple <- trainingDF.dtypes if ! tuple._1.equals("label") && ! tuple._1.equals("Id") && ! tuple._2.equals("StringType")) yield tuple._1
 
-    /** Prepare Features */
+    trainingDF = trainingDF.na.fill(-9999, numericColumns)
+    testDF = testDF.na.fill(-9999, numericColumns)
 
-    val featureColumns = Array("MSSubClass", "LotArea", "OverallQual", "OverallCond", "YearBuilt", "YearRemodAdd", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "1stFlrSF", "2ndFlrSF", "LowQualFinSF", "GrLivArea", "BsmtFullBath", "BsmtHalfBath", "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr", "TotRmsAbvGrd", "Fireplaces", "GarageCars", "GarageArea", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", "3SsnPorch", "ScreenPorch", "PoolArea", "MoSold", "YrSold")
-    val labelColumn = "SalePrice"
+    val categoricalColumns =
+      for (tuple <- trainingDF.dtypes if ! tuple._1.equals("label") && ! tuple._1.equals("Id") && tuple._2.equals("StringType")) yield tuple._1
 
-    val assembler = new VectorAssembler()
+    // encode categorical feature
+    for (col <- categoricalColumns) {
+      val stringIndexer: StringIndexer = new StringIndexer()
+        .setInputCol(col)
+        .setOutputCol(col + "_Index")
+        .setHandleInvalid("keep")
+      val stringIndexerModel: StringIndexerModel = stringIndexer.fit(trainingDF)
+      trainingDF = stringIndexerModel.transform(trainingDF)
+      testDF = stringIndexerModel.transform(testDF)
+      trainingDF = trainingDF.drop(col)
+      testDF = testDF.drop(col)
+    }
+
+    val featureColumns =
+      for (col <- trainingDF.columns if ! col.equals("label") && ! col.equals("Id")) yield col
+
+    val vectorAssembler = new VectorAssembler()
       .setInputCols(featureColumns)
       .setOutputCol("features")
+    trainingDF = vectorAssembler.transform(trainingDF).select("Id", "features", "label")
+    testDF = vectorAssembler.transform(testDF).select("Id", "features")
 
-    val featurizedTrainingData = assembler.transform(trainingDF).select("Id", "features", "SalePrice")
-    val featurizedTestData = assembler.transform(testDF).select("Id", "features")
+    if (debug) trainingDF.show(2)
+    if (debug) testDF.show(2)
 
-    val Array(trainingData, validationData) = featurizedTrainingData.randomSplit(Array(0.8, 0.2))
-    //val trainingData = featurizedTrainingData
-    val testData = featurizedTestData
+    /** Choose Regressors */
 
-    if (debug) println("Features prepared")
-
-    /** Choose regressor */
+    val lr = new LinearRegression()
+      .setLabelCol("label")
+      .setFeaturesCol("features")
 
     val dt = new DecisionTreeRegressor()
-      .setLabelCol("SalePrice")
+      .setLabelCol("label")
       .setFeaturesCol("features")
+      .setImpurity("variance")
 
     val rf = new RandomForestRegressor()
-      .setLabelCol("SalePrice")
+      .setLabelCol("label")
       .setFeaturesCol("features")
+      .setImpurity("variance")
 
     val gbt = new GBTRegressor()
-      .setLabelCol("SalePrice")
+      .setLabelCol("label")
       .setFeaturesCol("features")
-      .setMaxIter(10)
+      .setImpurity("variance")
 
     if (debug) println("Regressors selected")
 
-    /** Create Pipeline */
+    /** Create Pipeline and Parameter builder for Hyper-parameter tuning of models */
 
-    val dtPipeline = new Pipeline()
-      .setStages(Array(dt))
+    val pipeline = new Pipeline()
 
-    val rfPipeline = new Pipeline()
-      .setStages(Array(rf))
+    val paramGrid_lr = new ParamGridBuilder()
+      .baseOn(pipeline.stages -> Array[PipelineStage](lr))
+      .addGrid(lr.maxIter, Array(10, 20, 30))
+      .addGrid(lr.regParam, Array(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 0.1))
+      .addGrid(lr.elasticNetParam, Array(0.7, 0.8, 0.9))
+      .build()
 
-    val gbtPipeline = new Pipeline()
-      .setStages(Array(gbt))
+    val paramGrid_dt = new ParamGridBuilder()
+      .baseOn(pipeline.stages -> Array[PipelineStage](dt))
+      .addGrid(dt.maxDepth, Array(2, 3, 5, 10))
+      .build()
 
-    if (debug) println("Pipeline created")
+    val paramGrid_rf = new ParamGridBuilder()
+      .baseOn(pipeline.stages -> Array[PipelineStage](rf))
+      .addGrid(rf.maxDepth, Array(2, 3, 5, 10))
+      .addGrid(rf.numTrees, Array(5, 10, 15, 20))
+      .build()
 
-    /** Train and Prepare model */
+    val paramGrid_gbt = new ParamGridBuilder()
+      .baseOn(pipeline.stages -> Array[PipelineStage](gbt))
+      .addGrid(gbt.maxDepth, Array(2, 3, 5, 10))
+      .addGrid(gbt.maxIter, Array(5, 10, 15, 20))
+      .build()
 
-    val dtModel = dtPipeline.fit(trainingData)
+    val paramGrid = paramGrid_lr //++ paramGrid_dt ++ paramGrid_rf ++ paramGrid_gbt
 
-    if (debug) println("Learned Decision tree model")
+    if (debug) println("Pipeline and Parameter grid built for models")
 
-    //println (dtModel.stages(0).asInstanceOf[DecisionTreeRegressionModel].toDebugString)
+    /** Set evaluator */
 
-    val rfModel = rfPipeline.fit(trainingData)
-
-    if (debug) println("Learned Random forest model")
-
-    //println(rfModel.stages(0).asInstanceOf[RandomForestRegressionModel].toDebugString)
-
-    val gbtModel = gbtPipeline.fit(trainingData)
-
-    if (debug) println("Learned Gradient Boosting Tree model")
-
-    // println(gbtModel.stages(0).asInstanceOf[GBTRegressionModel].toDebugString)
-
-    /** Predict using model */
-
-    val dtPredictions = dtModel.transform(validationData)
-
-    if (debug) {
-      println("Decision Tree Predictions")
-      dtPredictions.select("id","SalePrice", "prediction").show(5)
-    }
-
-    val rfPredictions = rfModel.transform(validationData)
-
-    if (debug) {
-      println("Random Forest Predictions")
-      rfPredictions.select("id","SalePrice", "prediction").show(5)
-    }
-
-    val gbtPredictions = gbtModel.transform(validationData)
-
-    if (debug) {
-      println("Gradient Boosting Tree Predictions")
-      gbtPredictions.select("id","SalePrice", "prediction").show(5)
-    }
-
-    /** Evaluate Model */
-
-    val regressionEvaluator = new RegressionEvaluator()
-      .setLabelCol("SalePrice")
+    val evaluator = new RegressionEvaluator()
+      .setLabelCol("label")
       .setPredictionCol("prediction")
       .setMetricName("rmse")
 
-    val dtRmse = regressionEvaluator.evaluate(dtPredictions)
-    println("RMSE of Decision Tree model: " + dtRmse)
+    /** Find best model */
 
-    val rfRmse = regressionEvaluator.evaluate(rfPredictions)
-    println("RMSE of Random Forest model: " + rfRmse)
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(5)
+      .setParallelism(3) // Evaluate up to 3 parameter settings in parallel
 
-    val gbtRmse = regressionEvaluator.evaluate(gbtPredictions)
-    println("RMSE of Gradient Boosting Tree model: " + gbtRmse)
+    if (debug) println("Cross validator set for finding best model parameters")
 
-    /*
-    val outputFile = System.getProperty("user.dir") + "/housing-predictions/" + Calendar.getInstance()
-      .getTime
-      .toString
-      .replaceAll(" ", "")
+    /** Split the data into training and test sets */
 
-    dtPredictions.select("id", "prediction")
-      .coalesce(1)
-      .write
-      .option("header", "true")
-      .csv(outputFile)
+    val Array(training, validation) = trainingDF.randomSplit(Array(0.9, 0.2), seed = 11L)
 
-    println("Decision Tree Prediction output exported as " + outputFile + ".csv")
-    */
+    if (debug) println("Training and Validation sets formed")
+
+    /** Training with Best Model */
+
+    println("Running cross-validation to choose the best model...")
+
+    val cvModel = cv.fit(training)
+
+    println("Best model found")
+
+    val bestModel = cvModel.bestEstimatorParamMap
+    println(bestModel)
+
+    /** Make Prediction on validation set using model */
+
+    val prediction = cvModel.transform(validation)
+
+    println("Predictions made on validation set\n")
+
+    /** Evaluate Model */
+
+    val rmse = evaluator.evaluate(prediction)
+    println(s"RMSE of Best Model is: $rmse")
 
     spark.stop()
 
@@ -180,9 +206,16 @@ object HousePrice {
 
   }
 
-  def trainingSchema: StructType = StructType(dataSchema)
+  implicit class BestParamMapCrossValidatorModel(cvModel: CrossValidatorModel) {
+    def bestEstimatorParamMap: ParamMap = {
+      cvModel.getEstimatorParamMaps
+        .zip(cvModel.avgMetrics)
+        .maxBy(_._2)
+        ._1
+    }
+  }
 
-  def testSchema: StructType = StructType(dataSchema.dropRight(1)) // exclude label column
+  def trainingSchema: StructType = StructType(dataSchema)
 
   def dataSchema = Array(
     StructField("Id", IntegerType, true),
@@ -267,5 +300,7 @@ object HousePrice {
     StructField("SaleCondition", StringType, true),
     StructField("SalePrice", IntegerType, true)
   )
+
+  def testSchema: StructType = StructType(dataSchema.dropRight(1)) // exclude label column
 
 }
