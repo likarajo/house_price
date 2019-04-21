@@ -3,4 +3,4 @@ project
 target
 .DS_Store
 housing-predictions
-.ipynb*
+.ipynb_checkpoints
