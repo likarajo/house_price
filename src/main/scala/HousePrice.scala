@@ -143,7 +143,7 @@ object HousePrice {
       .addGrid(gbt.maxIter, Array(1, 2, 3, 4, 5))
       .build()
 
-    val paramGrid =   paramGrid_gbt //++ paramGrid_lr ++ paramGrid_dt ++ paramGrid_rf
+    val paramGrid =   paramGrid_rf // ++ paramGrid_gbt ++ paramGrid_lr ++ paramGrid_dt
 
     if (debug) println("Pipeline and Parameter grid built for models")
 
