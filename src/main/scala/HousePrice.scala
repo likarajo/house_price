@@ -1,6 +1,4 @@
-import java.io.{File, PrintWriter}
-import java.util.Calendar
-
+import ml.dmlc.xgboost4j.scala.spark.XGBoostRegressor
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.evaluation.RegressionEvaluator
 import org.apache.spark.ml.feature.{StringIndexer, StringIndexerModel, VectorAssembler}
@@ -22,13 +20,13 @@ object HousePrice {
 
     val Array(inputDir, outputDir) = args.take(2)
 
-    val time = Calendar.getInstance().getTime.toString.replaceAll(" ", "")
-    val writer = new PrintWriter(new File(outputDir + "/" + time + "_model.txt"))
+    //val time = Calendar.getInstance().getTime.toString.replaceAll(" ", "")
+    //val writer = new PrintWriter(new File(outputDir + "/" + time + "_model.txt"))
 
     Logger.getLogger("org").setLevel(Level.OFF)
     Logger.getLogger("akka").setLevel(Level.OFF)
 
-    val debug = true
+    val debug = false
 
     val spark = SparkSession
       .builder
@@ -48,7 +46,7 @@ object HousePrice {
       .option("inferSchema", "true")
       .load(inputDir + "/train.csv")
 
-    if (debug) println("Data read into DataFrames")
+    if (debug) println("Data read into DataFrame")
 
     /** Pre-Processing Features */
 
@@ -56,14 +54,20 @@ object HousePrice {
     trainingDF = trainingDF.drop("1stFlrSF", "GarageYrBlt", "GarageArea", "1stFloor", "TotRmsAbvGrd", "PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage",
       "GarageCond", "GarageType", "GarageFinish", "GarageQual", "BsmtExposure", "BsmtFinType2", "BsmtFinType1", "BsmtCond", "BsmtQual", "MasVnrArea", "MasVnrType")
 
+    if (debug) println("Dropped unimportant columns")
+
     // Drop null value rows
     trainingDF = trainingDF.filter(trainingDF("Electrical")=!="NA")
     trainingDF = trainingDF.filter(!trainingDF("Id").isin(1299,524))
+
+    if (debug) println("Handled null values")
 
     // Remove skewness
     trainingDF = trainingDF.withColumn("SalePrice", log1p("SalePrice"))
     trainingDF = trainingDF.withColumn("GrLivArea", log1p("GrLivArea"))
     trainingDF = trainingDF.withColumn("TotalBsmtSF", log1p("TotalBsmtSF"))
+
+    if (debug) println("Removed data skewness")
 
     val categoricalColumns =
       for (tuple <- trainingDF.dtypes if ! tuple._1.equals("SalePrice") && ! tuple._1.equals("Id") && tuple._2.equals("StringType")) yield tuple._1
@@ -78,6 +82,8 @@ object HousePrice {
       trainingDF = trainingDF.drop(col)
     }
 
+    if (debug) println("Feature indexing completed")
+
     val featureColumns =
       for (col <- trainingDF.columns if ! col.equals("SalePrice") && ! col.equals("Id")) yield col
 
@@ -87,10 +93,12 @@ object HousePrice {
 
     trainingDF = vectorAssembler.transform(trainingDF)
 
+    if (debug) println("Features assembled")
+
     trainingDF = trainingDF.select("Id", "features", "SalePrice")
       .toDF("Id", "features", "label")
 
-    if (debug) trainingDF.show(2)
+    if (debug) trainingDF.show(5)
 
     /** Choose Regressors */
 
@@ -112,6 +120,12 @@ object HousePrice {
       .setLabelCol("label")
       .setFeaturesCol("features")
       .setImpurity("variance")
+
+    val xgb = new XGBoostRegressor()
+      .setLabelCol("label")
+      .setFeaturesCol("features")
+      .setObjective("reg:linear")
+
 
     if (debug) println("Regressors selected")
 
@@ -143,7 +157,13 @@ object HousePrice {
       .addGrid(gbt.maxIter, Array(1, 2, 3, 4, 5))
       .build()
 
-    val paramGrid =   paramGrid_rf // ++ paramGrid_gbt ++ paramGrid_lr ++ paramGrid_dt
+    val paramGrid_xgb = new ParamGridBuilder()
+      .baseOn(pipeline.stages -> Array[PipelineStage](xgb))
+      .addGrid(xgb.eta, Array(0.001, 0.01, 0.1))
+      .addGrid(xgb.maxDepth, Array(2, 3, 4, 5))
+      .build()
+
+    val paramGrid =   paramGrid_xgb // ++ paramGrid_rf ++ paramGrid_gbt ++ paramGrid_lr ++ paramGrid_dt
 
     if (debug) println("Pipeline and Parameter grid built for models")
 
@@ -173,7 +193,7 @@ object HousePrice {
 
     /** Training with Best Model */
 
-    println("Running cross-validation to choose the best model...")
+    println("Running cross-validation on training set to choose the best model...")
 
     val cvModel = cv.fit(training)
 
