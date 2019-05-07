@@ -1,36 +1,38 @@
-import ml.dmlc.xgboost4j.scala.spark.XGBoostRegressor
+import java.io.{ByteArrayOutputStream, File, PrintWriter}
+import java.util.Calendar
+
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.evaluation.RegressionEvaluator
-import org.apache.spark.ml.feature.{StringIndexer, StringIndexerModel, VectorAssembler}
+import org.apache.spark.ml.feature.{StringIndexer, VectorAssembler}
 import org.apache.spark.ml.param.ParamMap
-import org.apache.spark.ml.regression.{LinearRegression, _}
+import org.apache.spark.ml.regression.{DecisionTreeRegressor, GBTRegressor, LinearRegression, RandomForestRegressor}
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.ml.{Pipeline, PipelineStage}
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.log1p
+import org.apache.spark.sql.functions.{expm1, log1p}
 
 object HousePrice {
 
   def main(args: Array[String]): Unit = {
 
     if (args.length < 2) {
-      System.err.println("Usage: HousePrice <input dir path> <output dir path>")
+      System.err.println("Usage: HousePrice <training file path> <test file path> <output dir path>")
       System.exit(1)
     }
 
-    val Array(inputDir, outputDir) = args.take(2)
+    val Array(trainData, testData, outputDir) = args.take(3)
 
-    //val time = Calendar.getInstance().getTime.toString.replaceAll(" ", "")
-    //val writer = new PrintWriter(new File(outputDir + "/" + time + "_model.txt"))
+    val time = Calendar.getInstance().getTime.toString.replaceAll(" ", "")
+    val writer = new PrintWriter(new File(outputDir + "/" + time + "_model_predict.txt"))
 
     Logger.getLogger("org").setLevel(Level.OFF)
     Logger.getLogger("akka").setLevel(Level.OFF)
 
-    val debug = false
+    val debug = true
 
     val spark = SparkSession
       .builder
-      .master("local[*]")
+      //.master("local[*]")
       .appName("House Price Prediction")
       .getOrCreate()
     if (debug) println("Connected to Spark")
@@ -44,7 +46,14 @@ object HousePrice {
       .option("delimiter", ",")
       .option("header", "true")
       .option("inferSchema", "true")
-      .load(inputDir + "/train.csv")
+      .load(trainData)
+
+    var testDF = spark.read
+      .format("com.databricks.spark.csv") // allows reading CSV files as Spark DataFrames
+      .option("delimiter", ",")
+      .option("header", "true")
+      .option("inferSchema", "true")
+      .load(testData)
 
     if (debug) println("Data read into DataFrame")
 
@@ -54,11 +63,14 @@ object HousePrice {
     trainingDF = trainingDF.drop("1stFlrSF", "GarageYrBlt", "GarageArea", "1stFloor", "TotRmsAbvGrd", "PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage",
       "GarageCond", "GarageType", "GarageFinish", "GarageQual", "BsmtExposure", "BsmtFinType2", "BsmtFinType1", "BsmtCond", "BsmtQual", "MasVnrArea", "MasVnrType")
 
+    testDF = testDF.drop("1stFlrSF", "GarageYrBlt", "GarageArea", "1stFloor", "TotRmsAbvGrd", "PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage",
+      "GarageCond", "GarageType", "GarageFinish", "GarageQual", "BsmtExposure", "BsmtFinType2", "BsmtFinType1", "BsmtCond", "BsmtQual", "MasVnrArea", "MasVnrType")
+
     if (debug) println("Dropped unimportant columns")
 
     // Drop null value rows
-    trainingDF = trainingDF.filter(trainingDF("Electrical")=!="NA")
-    trainingDF = trainingDF.filter(!trainingDF("Id").isin(1299,524))
+    trainingDF = trainingDF.filter(trainingDF("Electrical") =!= "NA")
+    trainingDF = trainingDF.filter(!trainingDF("Id").isin(1299, 524))
 
     if (debug) println("Handled null values")
 
@@ -67,25 +79,41 @@ object HousePrice {
     trainingDF = trainingDF.withColumn("GrLivArea", log1p("GrLivArea"))
     trainingDF = trainingDF.withColumn("TotalBsmtSF", log1p("TotalBsmtSF"))
 
+    testDF = testDF.withColumn("GrLivArea", log1p("GrLivArea"))
+    testDF = testDF.withColumn("TotalBsmtSF", log1p("TotalBsmtSF"))
+
     if (debug) println("Removed data skewness")
 
     val categoricalColumns =
-      for (tuple <- trainingDF.dtypes if ! tuple._1.equals("SalePrice") && ! tuple._1.equals("Id") && tuple._2.equals("StringType")) yield tuple._1
+      for (tuple <- trainingDF.dtypes if !tuple._1.equals("SalePrice") && !tuple._1.equals("Id") && tuple._2.equals("StringType")) yield tuple._1
 
     // encode categorical feature
     for (col <- categoricalColumns) {
       val stringIndexer: StringIndexer = new StringIndexer()
         .setInputCol(col)
         .setOutputCol(col + "_Index")
-      val stringIndexerModel: StringIndexerModel = stringIndexer.fit(trainingDF)
+      val stringIndexerModel = stringIndexer.fit(trainingDF)
       trainingDF = stringIndexerModel.transform(trainingDF)
       trainingDF = trainingDF.drop(col)
+    }
+
+    val categoricalColumnsTest =
+      for (tuple <- testDF.dtypes if !tuple._1.equals("Id") && tuple._2.equals("StringType")) yield tuple._1
+
+    // encode categorical feature
+    for (col <- categoricalColumnsTest) {
+      val stringIndexer: StringIndexer = new StringIndexer()
+        .setInputCol(col)
+        .setOutputCol(col + "_Index")
+      val stringIndexerModel = stringIndexer.fit(testDF)
+      testDF = stringIndexerModel.transform(testDF)
+      testDF = testDF.drop(col)
     }
 
     if (debug) println("Feature indexing completed")
 
     val featureColumns =
-      for (col <- trainingDF.columns if ! col.equals("SalePrice") && ! col.equals("Id")) yield col
+      for (col <- trainingDF.columns if !col.equals("SalePrice") && !col.equals("Id")) yield col
 
     val vectorAssembler = new VectorAssembler()
       .setInputCols(featureColumns)
@@ -93,12 +121,26 @@ object HousePrice {
 
     trainingDF = vectorAssembler.transform(trainingDF)
 
-    if (debug) println("Features assembled")
-
     trainingDF = trainingDF.select("Id", "features", "SalePrice")
       .toDF("Id", "features", "label")
 
-    if (debug) trainingDF.show(5)
+    //if (debug) trainingDF.show(5)
+
+    val featureColumnsTest =
+      for (col <- testDF.columns if !col.equals("Id")) yield col
+
+    val vectorAssemblerTest = new VectorAssembler()
+      .setInputCols(featureColumnsTest)
+      .setOutputCol("features")
+
+    testDF = vectorAssemblerTest.transform(testDF)
+
+    testDF = testDF.select("Id", "features")
+      .toDF("Id", "features")
+
+    //if (debug) testDF.show(5)
+
+    if (debug) println("Features assembled")
 
     /** Choose Regressors */
 
@@ -120,12 +162,6 @@ object HousePrice {
       .setLabelCol("label")
       .setFeaturesCol("features")
       .setImpurity("variance")
-
-    val xgb = new XGBoostRegressor()
-      .setLabelCol("label")
-      .setFeaturesCol("features")
-      .setObjective("reg:linear")
-
 
     if (debug) println("Regressors selected")
 
@@ -157,13 +193,7 @@ object HousePrice {
       .addGrid(gbt.maxIter, Array(1, 2, 3, 4, 5))
       .build()
 
-    val paramGrid_xgb = new ParamGridBuilder()
-      .baseOn(pipeline.stages -> Array[PipelineStage](xgb))
-      .addGrid(xgb.eta, Array(0.001, 0.01, 0.1))
-      .addGrid(xgb.maxDepth, Array(2, 3, 4, 5))
-      .build()
-
-    val paramGrid =   paramGrid_xgb // ++ paramGrid_rf ++ paramGrid_gbt ++ paramGrid_lr ++ paramGrid_dt
+    val paramGrid = paramGrid_gbt ++ paramGrid_rf ++ paramGrid_lr ++ paramGrid_dt
 
     if (debug) println("Pipeline and Parameter grid built for models")
 
@@ -191,28 +221,48 @@ object HousePrice {
 
     if (debug) println("Training and Validation sets formed")
 
-    /** Training with Best Model */
+    /** Train to find Best Model */
 
-    println("Running cross-validation on training set to choose the best model...")
+    println("Training models...")
+
+    if(debug) println("Running cross-validation on training set to choose the best model...")
 
     val cvModel = cv.fit(training)
 
-    println("Best model found")
+    //cvModel.save("./spark-regression-model")
 
-    val bestModel = cvModel.bestEstimatorParamMap
-    println(bestModel)
+    println("Best Model: \n" + cvModel.bestEstimatorParamMap)
+    writer.write("Best Model: \n" + cvModel.bestEstimatorParamMap.toString() + "\n")
 
-    /** Make Prediction on validation set using model */
+    /** Make Prediction on validation set using the Best model */
 
-    val prediction = cvModel.transform(validation)
+    val prediction_val = cvModel.transform(validation)
 
-    println("Predictions made on validation set\n")
+    if(debug) println("Predictions made on validation set")
 
-    /** Evaluate Model */
+    /** Evaluate the Best Model */
 
-    val rmse = evaluator.evaluate(prediction)
+    val rmse = evaluator.evaluate(prediction_val)
     println(s"RMSE of Best Model on validation set is: $rmse")
+    writer.write(s"RMSE of Best Model on validation set is: $rmse\n")
 
+    println("Predictions on test data")
+    writer.write("Predictions on test data\n")
+
+    var prediction = cvModel.transform(testDF)
+    prediction = prediction.withColumn("PredictedSalePrice", expm1("prediction"))
+    prediction = prediction.select("Id", "PredictedSalePrice")
+
+    prediction.show()
+
+    val outCapture = new ByteArrayOutputStream()
+    Console.withOut(outCapture) {
+      prediction.show()
+    }
+    val result = new String(outCapture.toByteArray)
+    writer.write(result)
+
+    writer.close()
     spark.stop()
 
     if (debug) println("Disconnected from Spark")
