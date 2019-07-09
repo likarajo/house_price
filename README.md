@@ -1,6 +1,6 @@
-House Price Prediction
+# House Price Prediction
 
-Steps to run:
+## Steps to run on AWS:
 
 1) The training and test data are in data/ folder:
     data/train.csv
@@ -10,24 +10,26 @@ Steps to run:
     s3://bucket/data/train.csv
     s3://bucket/data/test.csv
 
-
 2) The program (or jar) file also needs to be uploaded to S3:
     s3://bucket/house_price_2.11-0.1.jar
 
-3) The program needs to be run on a cluster having Spark 2.4.0 or a spark shell
-    The arguments that are needed to be passed to the program are:
-    training file path
-    test file path
-    output directory path
-
-    Syntax:
-
-    spark-submit --class HousePrice s3://bucket/house_price_2.11-0.1.jar s3://bucket/data/train.csv s3://bucket/data/test.csv s3://bucket
+3) The program needs to be run on a cluster having Spark 2.4.0 or a spark shell<br>
+   The arguments that are needed to be passed to the program are:
+   * training file path
+   * test file path
+   * output directory path
+Syntax:<br>
+```
+spark-submit --class HousePrice s3://bucket/house_price_2.11-0.1.jar 
+  s3://bucket/data/train.csv 
+  s3://bucket/data/test.csv 
+  s3://bucket
+```
 
 4) The result is obtained in a file that gets created in the output directory specified.
 
 5) Sample output
-
+```
 Best Model:
 {
 	linReg_610dcd27429d-elasticNetParam: 0.7,
@@ -48,3 +50,4 @@ Predictions on test data
 |1466|171593.45264224903|
 |1467|188041.81298588397|
 +----+------------------+
+```
