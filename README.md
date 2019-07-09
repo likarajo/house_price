@@ -1,5 +1,7 @@
 # House Price Prediction
 
+## [Project Report](Project_Report.pdf)
+
 ## Steps to run on AWS:
 
 1) The training and test data are in data/ folder:
