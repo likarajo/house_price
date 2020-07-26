@@ -1,6 +1,16 @@
 .idea
+
 project
 target
+
 .DS_Store
+
 housing-predictions
+
 .ipynb_checkpoints
+
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.RProj
